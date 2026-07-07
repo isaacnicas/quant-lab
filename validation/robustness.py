@@ -3,7 +3,7 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
-from signals.apply import apply_signal_lagged, compute_signal_mask
+from signals.apply import apply_signal_lagged
 
 
 def _safe_returns(prices: pd.DataFrame) -> pd.Series:
@@ -35,7 +35,10 @@ def walk_forward_split(prices: pd.DataFrame, signal: str, window_size: int, n_sp
         if len(out_sample) < 2 or len(in_sample) < window_size:
             continue
         returns = _safe_returns(out_sample)
-        mask = compute_signal_mask(out_sample, signal)
+        # Lagged within this window only (apply_signal_lagged shifts using
+        # out_sample's own length/index, so day 0 of out_sample can never be a
+        # trade day — no leakage across the train/test boundary from in_sample).
+        mask = apply_signal_lagged(out_sample, signal).to_numpy()
         if not mask.any():
             continue
         signal_returns = returns[mask]
