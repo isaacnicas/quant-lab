@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -51,7 +51,9 @@ def walk_forward_split(prices: pd.DataFrame, signal: str, window_size: int, n_sp
     return results
 
 
-def monte_carlo_test(signal: str, prices: pd.DataFrame, n_shuffles: int = 500) -> Dict[str, float]:
+def monte_carlo_test(
+    signal: str, prices: pd.DataFrame, n_shuffles: int = 2000, seed: Optional[int] = None
+) -> Dict[str, float]:
     returns = _safe_returns(prices)
     if returns.empty or len(returns) < 2:
         return {"signal": signal, "actual_sharpe": float("nan"), "p_value": 1.0}
@@ -68,12 +70,17 @@ def monte_carlo_test(signal: str, prices: pd.DataFrame, n_shuffles: int = 500) -
     if not np.isfinite(actual_sharpe):
         return {"signal": signal, "actual_sharpe": actual_sharpe, "p_value": 1.0}
 
+    # A local Generator (rather than the global np.random state) keeps a seed
+    # fully isolated to this call — passing seed=None (default) falls back to
+    # fresh entropy each time, same as before.
+    rng = np.random.default_rng(seed)
+
     # Null distribution: keep the same number of "in trade" days, but randomize
     # which days count by permuting the mask itself (not the return values) so
     # each shuffle still draws from the real, unshuffled return series.
     null_dist = []
     for _ in range(max(1, int(n_shuffles))):
-        shuffled_mask = np.random.permutation(mask)
+        shuffled_mask = rng.permutation(mask)
         shuffled_returns = returns_arr[shuffled_mask]
         s_std = shuffled_returns.std(ddof=0)
         s_sharpe = float(np.sqrt(252) * (shuffled_returns.mean() / s_std)) if np.isfinite(s_std) and s_std > 0 else float("nan")

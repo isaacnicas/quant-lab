@@ -14,4 +14,4 @@ class Config:
     regime_lookback: int = 90
     max_signal_combinations: int = 200
     fdr_alpha: float = 0.05
-    monte_carlo_shuffles: int = 500
+    monte_carlo_shuffles: int = 2000
