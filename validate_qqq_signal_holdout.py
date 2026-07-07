@@ -61,11 +61,12 @@ def main() -> None:
 
     holdout_returns = pd.Series(net_arr[holdout_mask])
     holdout_dates = dates[holdout_mask].reset_index(drop=True)
-    holdout_trades = int(trade_mask[holdout_mask].sum())
+    holdout_days_in_position = int(trade_mask[holdout_mask].sum())
 
-    # Trade-level win rate: group into discrete trades on the full (lookback +
-    # holdout) series so a trade isn't fragmented at the 2024-01-01 boundary,
-    # then keep only trades that actually entered within the holdout window.
+    # Trade-level win rate + discrete trade count: group into discrete trades on
+    # the full (lookback + holdout) series so a trade isn't fragmented at the
+    # 2024-01-01 boundary, then keep only trades that actually entered within
+    # the holdout window.
     wins = []
     for start, end in group_trades(trade_mask):
         entry_date = dates.iloc[start]
@@ -73,13 +74,15 @@ def main() -> None:
             cumulative = float(np.prod(1.0 + net_arr[start:end]) - 1.0)
             wins.append(cumulative > 0)
     win_rate = (sum(wins) / len(wins)) if wins else float("nan")
+    holdout_trades = len(wins)
 
     print(f"Signal: {SIGNAL!r} on {TICKER}, holdout {HOLDOUT_START.date()} - {HOLDOUT_END.date()}, "
           f"net of {COST_BPS}bps transaction costs\n")
-    print(f"{'Trades':20s}: {holdout_trades}")
+    print(f"{'Trades (discrete)':20s}: {holdout_trades}")
+    print(f"{'Days In Position':20s}: {holdout_days_in_position}")
     print(f"{'Sharpe':20s}: {calculate_sharpe(holdout_returns):.4f}")
     print(f"{'Win Rate':20s}: {win_rate:.4f}")
-    print(f"{'Max Drawdown':20s}: {calculate_max_drawdown(holdout_returns):.4f}")
+    print(f"{'Max Drawdown (Full Alloc)':20s}: {calculate_max_drawdown(holdout_returns / POSITION_SIZE):.4f}")
     print(f"{'Net CAGR':20s}: {calculate_cagr(holdout_returns, holdout_dates):.8f}")
     print(f"{'Net CAGR (Full Alloc)':20s}: {calculate_cagr(holdout_returns / POSITION_SIZE, holdout_dates):.8f}")
 

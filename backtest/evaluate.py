@@ -143,7 +143,7 @@ def run_backtest(
     if price_series.empty or len(price_series) < 2:
         return {
             "Sharpe": float("nan"), "Max Drawdown": float("nan"), "Win Rate": float("nan"),
-            "Trades": 0, "CAGR": float("nan"),
+            "Trades": 0, "Days In Position": 0, "CAGR": float("nan"),
             "Gross Sharpe": float("nan"), "Net Sharpe": float("nan"),
             "Gross Max Drawdown": float("nan"), "Net Max Drawdown": float("nan"),
             "Max Drawdown (Position-Scaled)": float("nan"),
@@ -196,7 +196,8 @@ def run_backtest(
         "Sharpe": net_sharpe,
         "Max Drawdown": net_dd_full,
         "Win Rate": calculate_win_rate(net_returns, trade_mask),
-        "Trades": int(np.sum(raw_mask)),
+        "Trades": len(group_trades(trade_mask)),
+        "Days In Position": int(np.sum(raw_mask)),
         "CAGR": net_cagr,
         "Gross Sharpe": gross_sharpe,
         "Net Sharpe": net_sharpe,
