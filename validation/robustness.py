@@ -1,10 +1,16 @@
 import hashlib
+from itertools import combinations
 from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from scipy.stats import kurtosis as _kurtosis
+from scipy.stats import norm
+from scipy.stats import skew as _skew
 
 from signals.apply import apply_signal_lagged
+
+_EULER_MASCHERONI = 0.5772156649015329
 
 
 def deterministic_seed(ticker: str, signal: str) -> int:
@@ -176,6 +182,145 @@ def regime_consistency_check(signal: str, prices: pd.DataFrame, regimes: List[st
         if len(regime_slice) >= 5:
             regime_returns.append(regime_slice.mean())
     return sum(v > 0 for v in regime_returns) >= 2
+
+
+def expected_max_sharpe(n_trials: int, mean_sharpe: float, std_sharpe: float) -> float:
+    """Expected maximum of n_trials iid Sharpe-ratio draws under the null
+    (Bailey & Lopez de Prado 2014, "The Deflated Sharpe Ratio", eq. 8):
+
+        E[max] ~= mean + std * ( (1-gamma)*Phi^-1(1 - 1/N) + gamma*Phi^-1(1 - 1/(N*e)) )
+
+    where gamma is the Euler-Mascheroni constant and Phi^-1 is the inverse
+    standard normal CDF. Unit-agnostic: mean_sharpe/std_sharpe must simply be
+    in the same units as the Sharpe values being maximized over."""
+    if n_trials <= 1:
+        return float(mean_sharpe)
+    n = float(n_trials)
+    term1 = (1.0 - _EULER_MASCHERONI) * norm.ppf(1.0 - 1.0 / n)
+    term2 = _EULER_MASCHERONI * norm.ppf(1.0 - 1.0 / (n * np.e))
+    return float(mean_sharpe + std_sharpe * (term1 + term2))
+
+
+def deflated_sharpe_ratio(
+    observed_sharpe: float,
+    returns: pd.Series,
+    n_trials: int,
+    mean_sharpe_trials: float,
+    std_sharpe_trials: float,
+) -> Dict[str, float]:
+    """
+    Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014).
+
+    UNITS: `observed_sharpe`, `mean_sharpe_trials`, and `std_sharpe_trials`
+    are all expected ANNUALIZED (sqrt(252)-scaled) -- matching every other
+    Sharpe value in this codebase (run_backtest, monte_carlo_test, the
+    `sharpe` column in the experiments table). The DSR formula itself is
+    derived on the NON-annualized per-period Sharpe (the sqrt(T-1) term and
+    the skew/kurtosis correction come from the per-period return
+    distribution), so this function de-annualizes all three inputs by
+    dividing by sqrt(252) before applying the formula. `sr0` in the return
+    dict is re-annualized (multiplied back by sqrt(252)) purely for
+    human-readable side-by-side comparison against `observed_sharpe`.
+
+    `returns` must be the actual per-period (daily) strategy return series
+    realized (NOT annualized) -- skew, kurtosis, and T (sample size) are
+    computed directly from it.
+    """
+    r = pd.Series(returns, dtype=float).replace([np.inf, -np.inf], np.nan).dropna()
+    T = len(r)
+    if T < 3 or not np.isfinite(observed_sharpe):
+        return {
+            "dsr": float("nan"), "sr0": float("nan"), "skew": float("nan"),
+            "kurtosis": float("nan"), "n_trials": int(n_trials), "T": int(T),
+        }
+
+    sqrt_252 = np.sqrt(252.0)
+    sr_daily = observed_sharpe / sqrt_252
+    mean_daily = mean_sharpe_trials / sqrt_252
+    std_daily = std_sharpe_trials / sqrt_252
+
+    sr0_daily = expected_max_sharpe(n_trials, mean_daily, std_daily)
+
+    g3 = float(_skew(r))
+    g4 = float(_kurtosis(r, fisher=False))  # Pearson's kurtosis (normal = 3), per the DSR formula
+
+    denom = 1.0 - g3 * sr_daily + ((g4 - 1.0) / 4.0) * sr_daily ** 2
+    if denom <= 0 or not np.isfinite(denom):
+        dsr = float("nan")
+    else:
+        z = ((sr_daily - sr0_daily) * np.sqrt(T - 1)) / np.sqrt(denom)
+        dsr = float(norm.cdf(z))
+
+    return {
+        "dsr": dsr,
+        "sr0": float(sr0_daily * sqrt_252),
+        "skew": g3,
+        "kurtosis": g4,
+        "n_trials": int(n_trials),
+        "T": int(T),
+    }
+
+
+def probability_of_backtest_overfitting(returns_matrix: np.ndarray, n_splits: int = 16) -> Dict[str, object]:
+    """
+    Combinatorially Symmetric Cross-Validation (CSCV) estimate of the
+    Probability of Backtest Overfitting (Bailey, Borwein, Lopez de Prado &
+    Zhu 2017; Lopez de Prado 2018, "Advances in Financial Machine Learning",
+    ch. 11).
+
+    returns_matrix: shape (T, N) -- T periods (rows), N candidate strategies
+    (columns), per-period (daily) returns.
+
+    Splits T into n_splits contiguous blocks. For every combination of
+    n_splits/2 blocks as in-sample (IS) and the complementary blocks as
+    out-of-sample (OOS) -- C(n_splits, n_splits/2) combinations -- finds the
+    IS-best strategy and computes its relative OOS rank among all N
+    strategies. PBO is the fraction of combinations where that IS-best
+    strategy's logit-transformed OOS rank is <= 0 (i.e. it landed in the
+    bottom half OOS): a selection process no better than chance.
+
+    With n_splits=16, C(16,8)=12,870 combinations -- do not raise n_splits
+    without measuring runtime, since combinations grow combinatorially.
+    """
+    returns_matrix = np.asarray(returns_matrix, dtype=float)
+    if returns_matrix.ndim != 2:
+        raise ValueError("returns_matrix must be 2-D: (T periods, N strategies)")
+    T, N = returns_matrix.shape
+    if n_splits % 2 != 0:
+        raise ValueError("n_splits must be even")
+    if T < n_splits:
+        raise ValueError(f"n_splits ({n_splits}) cannot exceed T ({T})")
+
+    blocks = np.array_split(np.arange(T), n_splits)
+    half = n_splits // 2
+
+    logits = []
+    for is_blocks in combinations(range(n_splits), half):
+        is_set = set(is_blocks)
+        oos_block_ids = [b for b in range(n_splits) if b not in is_set]
+        is_idx = np.concatenate([blocks[b] for b in sorted(is_set)])
+        oos_idx = np.concatenate([blocks[b] for b in oos_block_ids])
+
+        is_returns = returns_matrix[is_idx]
+        oos_returns = returns_matrix[oos_idx]
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            is_std = is_returns.std(axis=0, ddof=0)
+            is_sharpe = np.where(is_std > 0, is_returns.mean(axis=0) / is_std, -np.inf)
+            oos_std = oos_returns.std(axis=0, ddof=0)
+            oos_sharpe = np.where(oos_std > 0, oos_returns.mean(axis=0) / oos_std, -np.inf)
+
+        n_star = int(np.argmax(is_sharpe))
+
+        # Relative rank of the IS-best strategy's OOS performance among all N
+        # strategies, scaled into (0, 1) via rank/(N+1) to avoid logit(0)/logit(1).
+        rank_position = int(np.sum(oos_sharpe <= oos_sharpe[n_star]))  # 1..N
+        omega = rank_position / (N + 1)
+        logits.append(float(np.log(omega / (1.0 - omega))))
+
+    logits_arr = np.array(logits)
+    pbo = float(np.mean(logits_arr <= 0))
+    return {"pbo": pbo, "n_combinations": len(logits), "logits": logits_arr.tolist()}
 
 
 if __name__ == "__main__":
