@@ -1,9 +1,22 @@
+import hashlib
 from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 from signals.apply import apply_signal_lagged
+
+
+def deterministic_seed(ticker: str, signal: str) -> int:
+    """Python's built-in hash() randomizes str hashing per-process (PYTHONHASHSEED),
+    so hash((ticker, signal)) gives a DIFFERENT value on every run -- defeating
+    the point of a reproducible seed. SHA-256 is stable across processes.
+
+    This is the single canonical implementation -- do not duplicate it
+    elsewhere (see signals/apply.py for the analogous single-path principle
+    applied to signal masking/lagging)."""
+    digest = hashlib.sha256(f"{ticker}|{signal}".encode()).digest()
+    return int.from_bytes(digest[:4], "big") % (2**31)
 
 
 def _safe_returns(prices: pd.DataFrame) -> pd.Series:
@@ -52,8 +65,18 @@ def walk_forward_split(prices: pd.DataFrame, signal: str, window_size: int, n_sp
 
 
 def monte_carlo_test(
-    signal: str, prices: pd.DataFrame, n_shuffles: int = 2000, seed: Optional[int] = None
+    signal: str,
+    prices: pd.DataFrame,
+    n_shuffles: int = 2000,
+    ticker: Optional[str] = None,
+    seed: Optional[int] = None,
 ) -> Dict[str, float]:
+    """Seed resolution is structural, not caller-remembered (this is what bug #14
+    was: seed=None silently fell back to fresh entropy). Order:
+      1. explicit `seed` wins (back-compat / advanced use)
+      2. else derive from `ticker` via deterministic_seed(ticker, signal)
+      3. else raise -- there is no silent non-reproducible fallback.
+    """
     returns = _safe_returns(prices)
     if returns.empty or len(returns) < 2:
         return {"signal": signal, "actual_sharpe": float("nan"), "p_value": 1.0}
@@ -70,9 +93,17 @@ def monte_carlo_test(
     if not np.isfinite(actual_sharpe):
         return {"signal": signal, "actual_sharpe": actual_sharpe, "p_value": 1.0}
 
-    # A local Generator (rather than the global np.random state) keeps a seed
-    # fully isolated to this call — passing seed=None (default) falls back to
-    # fresh entropy each time, same as before.
+    if seed is None:
+        if ticker is None:
+            raise ValueError(
+                "monte_carlo_test requires either a ticker (to derive a "
+                "reproducible seed via deterministic_seed) or an explicit "
+                "seed. Reproducibility must not silently fall back to entropy."
+            )
+        seed = deterministic_seed(ticker, signal)
+
+    # A local Generator (rather than the global np.random state) keeps the
+    # seed fully isolated to this call.
     rng = np.random.default_rng(seed)
 
     # Null distribution: keep the same number of "in trade" days, but randomize
@@ -154,6 +185,6 @@ if __name__ == "__main__":
         "rsi": np.random.randint(0, 100, size=100),
     })
     print(walk_forward_split(sample, "ret_5d_z > 0.5 AND rsi < 30", 50, 5))
-    print(monte_carlo_test("ret_5d_z > 0.5 AND rsi < 30", sample))
+    print(monte_carlo_test("ret_5d_z > 0.5 AND rsi < 30", sample, ticker="DEMO"))
     print(fdr_correction([0.05, 0.02, 0.07, 0.01]))
     print(regime_consistency_check("ret_5d_z > 0.5", sample, ["bull", "bear"]))

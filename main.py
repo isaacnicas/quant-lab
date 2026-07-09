@@ -1,5 +1,3 @@
-import hashlib
-
 from config import Config
 from data.ingest import fetch_and_cache, load_prices
 from features.engineer import build_features
@@ -8,14 +6,6 @@ from signals.generate import generate_signals
 from backtest.evaluate import run_backtest
 from validation.robustness import monte_carlo_test, fdr_correction, regime_consistency_check
 from journal.log_experiment import log_experiment
-
-
-def _deterministic_seed(ticker: str, signal: str) -> int:
-    """Python's built-in hash() randomizes str hashing per-process (PYTHONHASHSEED),
-    so hash((ticker, signal)) gives a DIFFERENT value on every run -- defeating
-    the point of a reproducible seed. SHA-256 is stable across processes."""
-    digest = hashlib.sha256(f"{ticker}|{signal}".encode()).digest()
-    return int.from_bytes(digest[:4], "big") % (2**31)
 
 
 def run_pipeline(config: Config) -> None:
@@ -35,11 +25,12 @@ def run_pipeline(config: Config) -> None:
 
         mc_results, p_values = [], []
         for signal in signals:
-            # Deterministic per-(ticker, signal) seed: same pair always gets the
-            # same p-value on the same data, different signals get different
-            # seeds, and re-ingesting new price data naturally changes the result.
-            seed = _deterministic_seed(ticker, signal)
-            mc = monte_carlo_test(signal, featured, config.monte_carlo_shuffles, seed=seed)
+            # ticker= derives a deterministic per-(ticker, signal) seed inside
+            # monte_carlo_test (validation/robustness.py) -- same pair always
+            # gets the same p-value on the same data, different signals get
+            # different seeds, and re-ingesting new price data naturally
+            # changes the result.
+            mc = monte_carlo_test(signal, featured, config.monte_carlo_shuffles, ticker=ticker)
             mc_results.append(mc)
             p_values.append(mc["p_value"])
 
