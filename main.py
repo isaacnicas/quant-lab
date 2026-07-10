@@ -1,5 +1,5 @@
-from config import Config
-from data.ingest import fetch_and_cache, load_prices
+from config import Config, IN_SAMPLE_END
+from data.ingest import assert_discovery_in_sample, fetch_and_cache, load_prices
 from features.engineer import build_features
 from regimes.detect import label_regime
 from signals.generate import generate_signals
@@ -9,10 +9,21 @@ from journal.log_experiment import log_experiment
 
 
 def run_pipeline(config: Config) -> None:
+    # fetch_and_cache is NOT bounded by IN_SAMPLE_END: caching data through
+    # config.end_date (today) is harmless and useful for later evaluation of
+    # already-pre-registered hypotheses. Only the discovery READ below is
+    # bounded -- see data/ingest.py's assert_discovery_in_sample().
     fetch_and_cache(config.tickers, config.start_date, config.end_date, config.duckdb_path)
 
     for ticker in config.tickers:
-        prices = load_prices([ticker], config.start_date, config.end_date, config.duckdb_path)
+        # Discovery must never see data past IN_SAMPLE_END -- this is the
+        # project's only clean 2024-2025 holdout, and once discovery touches
+        # it, it is permanently spent. Bounding by IN_SAMPLE_END here (not
+        # config.end_date) is the primary fix; assert_discovery_in_sample()
+        # below is the structural backstop that catches it even if this call
+        # site is ever changed back by mistake.
+        prices = load_prices([ticker], config.start_date, IN_SAMPLE_END, config.duckdb_path)
+        assert_discovery_in_sample(prices, IN_SAMPLE_END)
         if prices.empty or len(prices) < 260:
             print(f"Skipping {ticker}: insufficient history")
             continue

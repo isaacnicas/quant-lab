@@ -2,14 +2,18 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List
 
-# Fixed boundary of the original in-sample research window (2018-01-01
-# through this date) that produced the audited 3,600-experiment result and
-# that the 2024-2025 holdout scripts (validate_qqq_signal_holdout.py, etc.)
-# are built around. Config.end_date below now rolls forward with the
-# calendar for day-to-day pipeline runs -- it is intentionally NOT tied to
-# this constant, so a future main.py run will pull in more recent data
-# (including what was previously the 2024-2025 holdout window) rather than
-# silently redefining what "holdout" has always meant in this project.
+# IN_SAMPLE_END bounds DISCOVERY. end_date (below, on Config) bounds
+# EVALUATION. They are not interchangeable -- do not use one where the other
+# is called for.
+#
+# IN_SAMPLE_END is frozen and never rolls: it is the fixed boundary of the
+# original in-sample research window (2018-01-01 through this date) that
+# produced the audited 3,600-experiment result. Discovery (signal generation,
+# Monte Carlo, FDR, backtest, log_experiment -- see main.py's discovery guard)
+# must NEVER see data past this date; the 2024-2025 window is this project's
+# only clean holdout, and once discovery touches it, it is permanently spent.
+# Config.end_date rolls forward with the calendar so out-of-sample EVALUATION
+# of already-pre-registered hypotheses can use fresh data over time.
 IN_SAMPLE_END = datetime(2023, 12, 31)
 
 
