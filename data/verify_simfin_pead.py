@@ -22,7 +22,7 @@ MAX_MARKET_CAP = 2_000_000_000
 MIN_SMALL_CAP_COMPANIES = 300
 MIN_EPS_HISTORY_COMPANIES = 200
 MIN_CONSECUTIVE_QUARTERS = 8
-IN_SAMPLE_START = pd.Timestamp("2020-01-01")  # amended 2026-07-10: SimFin free tier history limit
+IN_SAMPLE_START = pd.Timestamp("2022-07-01")  # amended 2026-07-10 (2nd amendment): actual usable-SUE data floor
 IN_SAMPLE_END = pd.Timestamp("2023-12-31")
 
 
@@ -39,6 +39,19 @@ def _max_consecutive_run(mask: np.ndarray) -> int:
         if mask[in_group][0]:  # this group is a run of True
             best = max(best, int(in_group.sum()))
     return best
+
+
+def _first_usable_sue_date(group: pd.DataFrame) -> pd.Timestamp | None:
+    """Publish Date of the 8th quarter in the FIRST run of MIN_CONSECUTIVE_QUARTERS
+    consecutive non-null EPS quarters (chronological), i.e. the earliest date this
+    company's SUE becomes computable at all -- not the raw Report Date floor."""
+    valid = group["eps_basic"].notna().to_numpy()
+    run_len = 0
+    for i, v in enumerate(valid):
+        run_len = run_len + 1 if v else 0
+        if run_len >= MIN_CONSECUTIVE_QUARTERS:
+            return group.iloc[i]["Publish Date"]
+    return None
 
 
 def main() -> None:
@@ -121,11 +134,15 @@ def main() -> None:
         # column -- documented derivation (see load_income_pit's docstring in
         # data/ingest_pead.py for the same convention used at ingest time).
         inc["eps_basic"] = inc["Net Income (Common)"] / inc["Shares (Basic)"]
+        inc["Report Date"] = pd.to_datetime(inc["Report Date"])
+        inc["Publish Date"] = pd.to_datetime(inc["Publish Date"])
         inc = inc.sort_values(["Ticker", "Report Date"])
 
         n_with_history = 0
         sample_rows = None
+        first_usable_dates = {}
         for ticker, group in inc.groupby("Ticker"):
+            group = group.reset_index(drop=True)
             valid = group["eps_basic"].notna().to_numpy()
             if _max_consecutive_run(valid) >= MIN_CONSECUTIVE_QUARTERS:
                 n_with_history += 1
@@ -133,6 +150,9 @@ def main() -> None:
                     sample_rows = group[group["eps_basic"].notna()][
                         ["Ticker", "Report Date", "Publish Date", "eps_basic"]
                     ].tail(5)
+            fu_date = _first_usable_sue_date(group)
+            if fu_date is not None:
+                first_usable_dates[ticker] = fu_date
 
         print(f"n_companies with {MIN_CONSECUTIVE_QUARTERS}+ consecutive quarters "
               f"of non-null EPS (small-cap range): {n_with_history}")
@@ -142,14 +162,25 @@ def main() -> None:
             print("\nSample rows (ticker, report_date, publish_date, eps_basic):")
             print(sample_rows.to_string(index=False))
 
-    # ---- Check 4: date range coverage ----
-    print("\n--- Check 4: date range coverage ---")
-    report_dates_all = pd.to_datetime(income.index.get_level_values("Report Date"))
-    earliest, latest_date = report_dates_all.min(), report_dates_all.max()
-    print(f"Report Date range: {earliest.date()} to {latest_date.date()}")
-    results["check4"] = earliest <= IN_SAMPLE_START and latest_date >= IN_SAMPLE_END
-    print(f"Check 4: {'PASS' if results['check4'] else 'FAIL'} "
-          f"(need <= {IN_SAMPLE_START.date()} through >= {IN_SAMPLE_END.date()})")
+    # ---- Check 4: usable-SUE date floor (not the raw Report Date floor --
+    # what matters is when SUE first becomes computable at all, which lags
+    # the raw Report Date floor by the 8-quarter warmup). ----
+    print("\n--- Check 4: usable-SUE date floor ---")
+    if not first_usable_dates:
+        print("Skipping (no companies with usable SUE from Check 3)")
+        results["check4"] = False
+    else:
+        fu_series = pd.Series(first_usable_dates)
+        earliest_usable_sue = fu_series.min()
+        latest_report_date = inc["Report Date"].max()
+        print(f"Earliest usable-SUE publish_date across universe: {earliest_usable_sue.date()}")
+        print(f"Latest Report Date in dataset: {latest_report_date.date()}")
+        results["check4"] = (
+            earliest_usable_sue <= IN_SAMPLE_START and latest_report_date >= IN_SAMPLE_END
+        )
+        print(f"Check 4: {'PASS' if results['check4'] else 'FAIL'} "
+              f"(need earliest usable-SUE date <= {IN_SAMPLE_START.date()} "
+              f"and latest Report Date >= {IN_SAMPLE_END.date()})")
 
     # ---- Verdict ----
     print("\n" + "=" * 70)
