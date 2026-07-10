@@ -110,15 +110,15 @@ def compute_forward_returns(
     """
     For each (ticker, publish_date) event:
 
-    entry_date = the first trading day STRICTLY AFTER publish_date.
-        If publish_date is itself a trading day, this is the plain T+1
-        rule. If publish_date falls on a weekend/holiday, the first trading
-        day at or after publish_date is the "effective announcement date",
-        and entry_date is the trading day AFTER that (T+1 from the
-        effective date, not from the calendar date) -- per the
-        pre-registration's explicit rule. Note: this means a Saturday
-        publish_date enters on Tuesday (Monday = effective announcement
-        date, Tuesday = T+1 from it), not Monday.
+    entry_date = the first trading day STRICTLY AFTER publish_date -- i.e.
+        the smallest date in the price series greater than publish_date.
+        "T+1 open following the earnings announcement" means the first
+        trading day's open after the announcement date itself, not after
+        the first trading day after the announcement date. This handles
+        every case uniformly with no intermediate "effective announcement
+        date" step: a weekday publish enters the next trading day; a
+        Saturday or Sunday publish enters the following Monday; a Friday
+        publish before a 3-day weekend enters the following Tuesday.
     entry_price = open on entry_date.
 
     exit_date/exit_price: close hold_days trading days after entry_date,
@@ -150,8 +150,11 @@ def compute_forward_returns(
         for _, event in ticker_events.iterrows():
             publish_date = event["publish_date"]
 
-            pos = np.searchsorted(dates, np.datetime64(publish_date), side="left")
-            entry_idx = pos + 1
+            # side="right" gives the index of the first date strictly
+            # greater than publish_date directly -- no separate "advance to
+            # next trading day, then +1" step, which was adding an extra
+            # day of lag for weekend/holiday publish dates.
+            entry_idx = np.searchsorted(dates, np.datetime64(publish_date), side="right")
             if entry_idx >= n_prices:
                 continue  # not enough trailing price data loaded for this event yet
 

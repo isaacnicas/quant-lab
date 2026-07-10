@@ -152,16 +152,12 @@ def test_forward_returns_weekend_publish():
     events_df = pd.DataFrame({"ticker": ["AAA"], "publish_date": [saturday]})
     result = compute_forward_returns(prices_df, events_df, hold_days=5)
     assert len(result) == 1
-    # Effective announcement date (first trading day at/after Saturday) is
-    # Monday 2023-01-09; entry is T+1 from THAT (Tuesday 2023-01-10), per the
-    # pre-registration's explicit "add one more day" rule for weekend/holiday
-    # publish dates -- not the naive "next trading day is entry" reading
-    # (which would give Monday). Documented as a judgment call in the PR
-    # writeup since the task's one-line test description said "Monday".
+    # entry_date = first trading day strictly after publish_date. Saturday
+    # 2023-01-07's first trading day after it is Monday 2023-01-09 -- T+1
+    # from the announcement date itself, not from "the next trading day
+    # after the announcement" (which would incorrectly add an extra day).
     monday = pd.Timestamp("2023-01-09")
-    tuesday = pd.Timestamp("2023-01-10")
-    assert result["entry_date"].iloc[0] == tuesday
-    assert result["entry_date"].iloc[0] != monday
+    assert result["entry_date"].iloc[0] == monday
     assert result["entry_date"].iloc[0].day_name() != "Sunday"
     assert result["entry_date"].iloc[0].day_name() != "Saturday"
 
