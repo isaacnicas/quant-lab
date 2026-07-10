@@ -3,3 +3,4 @@ __pycache__/
 .pytest_cache/
 data/*.duckdb
 pipeline_run*.log
+data/simfin_cache/
