@@ -1,5 +1,31 @@
 # Paper Trading Spec — QQQ `ret_1d_z < 1.0 AND rsi < 30`
 
+> ## ⚠️ KILLED 2026-07-09 — DO NOT DEPLOY
+>
+> This candidate was killed by Deflated Sharpe Ratio (DSR) selection-bias
+> correction: **DSR = 0.042 at n_trials = 3,600** (the honest number, since
+> this signal was selected as the best of the full 18-ticker × 200-signal
+> sweep, not just competing against its own 200 QQQ variants) — well below
+> the noise ceiling. Observed net Sharpe 1.284 does not even clear
+> **SR0 = 1.817**, the expected maximum Sharpe that 3,600 pure-noise trials
+> would produce by chance. DSR fails even at the more forgiving n_trials=200
+> (0.170). This is the exact failure mode DSR exists to catch: the signal
+> looked FDR-significant in isolation (p=0.0015) precisely because FDR
+> controls expected false discoveries across a batch but does not correct
+> the winner's-curse bias of having picked the single best of thousands of
+> trials.
+>
+> **No capital or paper trades should be deployed against this signal.**
+> The mechanism record (`rsi_oversold_bounce` in the knowledge graph,
+> `journal/knowledge_graph.py`) is marked `status="killed"` with this
+> evidence in its notes. See `validate_dsr_pbo.py` for the full computation.
+>
+> The rest of this document is **retained as a template** for the next
+> candidate — specifically, one that goes through pre-registration
+> (`journal/knowledge_graph.py`'s `pre_register()`/`test_plan` schema)
+> *before* being tested, so its n_trials is honest by construction rather
+> than reconstructed after the fact.
+
 Status: live experiment, not a certified strategy. See `README.md` for the
 full backtest/audit history behind this signal.
 
