@@ -5,6 +5,7 @@ from journal.knowledge_graph import (
     link_experiments,
     pre_register,
     query_mechanisms,
+    unlock_prereg,
     update_mechanism,
     verify_prereg,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "query_mechanisms",
     "get_untested",
     "pre_register",
+    "unlock_prereg",
     "verify_prereg",
     "assert_pre_registered",
 ]

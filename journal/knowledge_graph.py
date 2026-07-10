@@ -239,6 +239,58 @@ def pre_register(duckdb_path: str, mechanism_id: str, test_plan: Dict[str, Any])
     return prereg_hash
 
 
+def unlock_prereg(duckdb_path: str, mechanism_id: str, reason: str) -> None:
+    """Explicitly unlock a pre-registration so it can be amended via a fresh
+    pre_register() call. This is the ONLY way prereg_locked can go back to
+    False -- there is no path that flips it silently.
+
+    Only permitted when the mechanism is currently locked and has ZERO
+    experiments logged against it (checked here structurally, not left as a
+    convention someone has to remember before calling this): amending a
+    pre-registration after testing has begun defeats the entire purpose of
+    pre-registration -- "we meant to test this all along" becomes
+    unfalsifiable the moment amendment-after-testing is allowed.
+
+    `reason` is required, not optional documentation -- it is appended to
+    the mechanism's notes so every unlock leaves an audit trail. An unlock
+    with no stated reason is exactly the kind of silent tampering this
+    schema exists to prevent."""
+    if not reason or not reason.strip():
+        raise ValueError("unlock_prereg requires a non-empty reason")
+
+    conn = duckdb.connect(duckdb_path)
+    _ensure_table(conn)
+    row = conn.execute(
+        "SELECT prereg_locked, experiment_ids, notes FROM mechanisms WHERE mechanism_id = ?",
+        [mechanism_id],
+    ).fetchone()
+    if row is None:
+        conn.close()
+        raise ValueError(f"No mechanism with id {mechanism_id!r}.")
+
+    locked, experiment_ids_json, notes = row
+    if not locked:
+        conn.close()
+        raise ValueError(f"Mechanism {mechanism_id!r} is not locked -- nothing to unlock.")
+
+    experiment_ids = json.loads(experiment_ids_json) if experiment_ids_json else []
+    if experiment_ids:
+        conn.close()
+        raise ValueError(
+            f"Mechanism {mechanism_id!r} has {len(experiment_ids)} experiment(s) already "
+            f"logged against it -- amending a pre-registration after testing has begun is "
+            f"not permitted. This is exactly the failure mode pre-registration exists to prevent."
+        )
+
+    now = datetime.now(timezone.utc)
+    new_notes = (notes or "") + f" | UNLOCKED {now.date().isoformat()}: {reason}"
+    conn.execute(
+        "UPDATE mechanisms SET prereg_locked = FALSE, notes = ?, updated_at = ? WHERE mechanism_id = ?",
+        [new_notes, now, mechanism_id],
+    )
+    conn.close()
+
+
 def verify_prereg(duckdb_path: str, mechanism_id: str, test_plan: Dict[str, Any]) -> bool:
     """Recompute the hash from the supplied plan and compare it to the stored
     prereg_hash. False means the plan differs from what was frozen at
@@ -315,6 +367,7 @@ __all__ = [
     "query_mechanisms",
     "get_untested",
     "pre_register",
+    "unlock_prereg",
     "verify_prereg",
     "assert_pre_registered",
 ]
