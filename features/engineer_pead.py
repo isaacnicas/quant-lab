@@ -121,19 +121,44 @@ def compute_forward_returns(
         publish before a 3-day weekend enters the following Tuesday.
     entry_price = open on entry_date.
 
+    position_direction = +1 (long) if sue_srw > 0, else -1 (short) --
+        events_df must carry a sue_srw column. Direction-aware: the two
+        legs of a long-short PEAD strategy are opposite positions in the
+        same underlying, so "adverse move" points opposite ways for each.
+
     exit_date/exit_price: close hold_days trading days after entry_date,
-    UNLESS the close on any day in [entry_date, exit_date] falls more than
-    stop_loss_pct below entry_price, in which case exit is that day's close
-    (stopped=True, days_to_stop recorded).
+    UNLESS the close on any day in [entry_date, exit_date] moves against
+    the position by more than stop_loss_pct, in which case exit is that
+    day's close (stopped=True, days_to_stop recorded):
+      - long (direction=+1): stop if close < entry_price * (1 - stop_loss_pct)
+        (price fell -- adverse for a long)
+      - short (direction=-1): stop if close > entry_price * (1 + stop_loss_pct)
+        (price rose -- adverse for a short)
+    A single direction-agnostic "price fell 10%" check (the original
+    implementation) left short positions with uncapped upside losses --
+    found during the PEAD pilot (2026-07-10), where 6 short positions ran
+    +53% to +74% against with stopped=False.
+
+    gross_return = direction * (exit_price - entry_price) / entry_price,
+    so a short that goes entry 100 -> exit 90 earns +10% (price fell, short
+    profits) and one that goes 100 -> 110 loses -10% -- the sign-flip must
+    stay consistent with the stop-loss direction above, not just the final
+    return, or a short could still exit into a favorable-looking "loss".
 
     Gross returns only -- transaction costs are applied in the backtest
     layer (backtest/evaluate.py), same convention as the rest of the
     pipeline.
 
     Returns columns: ticker, publish_date, entry_date, entry_price,
-    exit_date, exit_price, gross_return, stopped, hold_days_actual,
-    days_to_stop.
+    exit_date, exit_price, gross_return, position_direction, stopped,
+    hold_days_actual, days_to_stop.
     """
+    if "sue_srw" not in events_df.columns:
+        raise ValueError(
+            "compute_forward_returns requires a 'sue_srw' column in events_df "
+            "to determine position direction (long if > 0, short otherwise)."
+        )
+
     prices_df = prices_df.copy()
     prices_df["date"] = pd.to_datetime(prices_df["date"])
     events_df = events_df.copy()
@@ -149,6 +174,7 @@ def compute_forward_returns(
 
         for _, event in ticker_events.iterrows():
             publish_date = event["publish_date"]
+            direction = 1 if event["sue_srw"] > 0 else -1
 
             # side="right" gives the index of the first date strictly
             # greater than publish_date directly -- no separate "advance to
@@ -162,13 +188,15 @@ def compute_forward_returns(
             entry_price = opens[entry_idx]
 
             exit_idx_primary = min(entry_idx + hold_days, n_prices - 1)
-            stop_threshold = entry_price * (1 - stop_loss_pct)
+            long_stop_threshold = entry_price * (1 - stop_loss_pct)
+            short_stop_threshold = entry_price * (1 + stop_loss_pct)
 
             stopped = False
             days_to_stop = np.nan
             exit_idx = exit_idx_primary
             for k in range(entry_idx, exit_idx_primary + 1):
-                if closes[k] < stop_threshold:
+                adverse = (closes[k] < long_stop_threshold) if direction == 1 else (closes[k] > short_stop_threshold)
+                if adverse:
                     stopped = True
                     exit_idx = k
                     days_to_stop = k - entry_idx
@@ -176,7 +204,7 @@ def compute_forward_returns(
 
             exit_date = dates[exit_idx]
             exit_price = closes[exit_idx]
-            gross_return = (exit_price - entry_price) / entry_price
+            gross_return = direction * (exit_price - entry_price) / entry_price
 
             rows.append({
                 "ticker": ticker,
@@ -186,6 +214,7 @@ def compute_forward_returns(
                 "exit_date": pd.Timestamp(exit_date),
                 "exit_price": exit_price,
                 "gross_return": gross_return,
+                "position_direction": direction,
                 "stopped": stopped,
                 "hold_days_actual": exit_idx - entry_idx,
                 "days_to_stop": days_to_stop,

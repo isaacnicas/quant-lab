@@ -109,7 +109,7 @@ def test_forward_returns_t1_entry():
     prices_df = _make_prices("AAA", dates, opens, closes)
 
     publish_date = dates[3]  # a weekday, itself a trading day
-    events_df = pd.DataFrame({"ticker": ["AAA"], "publish_date": [publish_date]})
+    events_df = pd.DataFrame({"ticker": ["AAA"], "publish_date": [publish_date], "sue_srw": [1.0]})
 
     result = compute_forward_returns(prices_df, events_df, hold_days=5)
     assert len(result) == 1
@@ -127,17 +127,43 @@ def test_forward_returns_stop_loss():
     prices_df = _make_prices("AAA", dates, opens, closes)
 
     publish_date = dates[0]
-    events_df = pd.DataFrame({"ticker": ["AAA"], "publish_date": [publish_date]})
+    events_df = pd.DataFrame({"ticker": ["AAA"], "publish_date": [publish_date], "sue_srw": [1.5]})
     # entry_idx = 1 (T+1). Day 5 after entry (index 6) closes -12% from entry_price (100).
     prices_df.loc[prices_df["date"] == dates[6], "close"] = 88.0
 
     result = compute_forward_returns(prices_df, events_df, hold_days=20, stop_loss_pct=0.10)
     assert len(result) == 1
     row = result.iloc[0]
+    assert row["position_direction"] == 1
     assert row["stopped"] == True
     assert row["exit_date"] == dates[6]
     assert row["hold_days_actual"] == 5
     assert row["days_to_stop"] == 5
+    assert row["gross_return"] == pytest.approx(-0.12)
+
+
+def test_forward_returns_stop_loss_short():
+    dates = pd.bdate_range("2023-01-02", periods=30)
+    opens = [100.0] * 30
+    closes = [100.0] * 30
+    prices_df = _make_prices("AAA", dates, opens, closes)
+
+    publish_date = dates[0]
+    events_df = pd.DataFrame({"ticker": ["AAA"], "publish_date": [publish_date], "sue_srw": [-1.5]})
+    # entry_idx = 1 (T+1). Day 5 after entry (index 6) RISES +12% from entry_price (100) --
+    # adverse for a short, even though it would NOT trigger the long-side stop.
+    prices_df.loc[prices_df["date"] == dates[6], "close"] = 112.0
+
+    result = compute_forward_returns(prices_df, events_df, hold_days=20, stop_loss_pct=0.10)
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["position_direction"] == -1
+    assert row["stopped"] == True
+    assert row["exit_date"] == dates[6]
+    assert row["hold_days_actual"] == 5
+    assert row["days_to_stop"] == 5
+    # Short lost 12% because price rose against it: direction(-1) * (112-100)/100 = -0.12
+    assert row["gross_return"] == pytest.approx(-0.12)
 
 
 def test_forward_returns_weekend_publish():
@@ -149,7 +175,7 @@ def test_forward_returns_weekend_publish():
     closes = [100.5 + i for i in range(10)]
     prices_df = _make_prices("AAA", dates, opens, closes)
 
-    events_df = pd.DataFrame({"ticker": ["AAA"], "publish_date": [saturday]})
+    events_df = pd.DataFrame({"ticker": ["AAA"], "publish_date": [saturday], "sue_srw": [1.0]})
     result = compute_forward_returns(prices_df, events_df, hold_days=5)
     assert len(result) == 1
     # entry_date = first trading day strictly after publish_date. Saturday
