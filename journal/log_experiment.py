@@ -89,18 +89,21 @@ def _ensure_table(conn: duckdb.DuckDBPyConnection) -> None:
             code_hash VARCHAR,
             python_version VARCHAR,
             pandas_version VARCHAR,
-            numpy_version VARCHAR
+            numpy_version VARCHAR,
+            sharpe_deflated DOUBLE,
+            dsr_significant BOOLEAN
         )
     """)
     # ALTER ... ADD COLUMN IF NOT EXISTS covers the case where `experiments`
-    # already exists from a prior run with the old (pre-provenance) schema --
-    # CREATE TABLE IF NOT EXISTS above is a no-op there, so the existing rows
-    # (and all their data) are preserved; this backfills the new columns
-    # (NULL on old rows) without destroying anything.
+    # already exists from a prior run with an older schema -- CREATE TABLE IF
+    # NOT EXISTS above is a no-op there, so the existing rows (and all their
+    # data) are preserved; this backfills new columns (NULL on old rows)
+    # without destroying anything.
     for column, col_type in [
         ("git_commit", "VARCHAR"), ("code_hash", "VARCHAR"),
         ("python_version", "VARCHAR"), ("pandas_version", "VARCHAR"),
-        ("numpy_version", "VARCHAR"),
+        ("numpy_version", "VARCHAR"), ("sharpe_deflated", "DOUBLE"),
+        ("dsr_significant", "BOOLEAN"),
     ]:
         conn.execute(f"ALTER TABLE experiments ADD COLUMN IF NOT EXISTS {column} {col_type}")
 
@@ -113,6 +116,8 @@ def log_experiment(
     monte_carlo_p_value: Optional[float] = None,
     fdr_significant: Optional[bool] = None,
     regime_consistent: Optional[bool] = None,
+    sharpe_deflated: Optional[float] = None,
+    dsr_significant: Optional[bool] = None,
     params: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Log one experiment's full result set. Returns the experiment_id."""
@@ -121,31 +126,46 @@ def log_experiment(
 
     provenance = _get_provenance()
     experiment_id = f"{ticker}_{signal}_{datetime.now(timezone.utc).timestamp()}"
+    # Named columns, not positional VALUES(?,?,...) -- a positional insert
+    # against a schema that keeps growing (provenance columns, now DSR
+    # columns) is a silent-corruption bug waiting to happen the next time
+    # someone reorders or inserts a column in the middle.
     conn.execute(
         """
-        INSERT OR REPLACE INTO experiments VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO experiments (
+            experiment_id, signal, ticker, sharpe, max_drawdown, win_rate, cagr,
+            trades, monte_carlo_p_value, fdr_significant, regime_consistent,
+            params, created_at, git_commit, code_hash, python_version,
+            pandas_version, numpy_version, sharpe_deflated, dsr_significant
+        ) VALUES (
+            $experiment_id, $signal, $ticker, $sharpe, $max_drawdown, $win_rate, $cagr,
+            $trades, $monte_carlo_p_value, $fdr_significant, $regime_consistent,
+            $params, $created_at, $git_commit, $code_hash, $python_version,
+            $pandas_version, $numpy_version, $sharpe_deflated, $dsr_significant
+        )
         """,
-        [
-            experiment_id,
-            signal,
-            ticker,
-            backtest_metrics.get("Sharpe"),
-            backtest_metrics.get("Max Drawdown"),
-            backtest_metrics.get("Win Rate"),
-            backtest_metrics.get("CAGR"),
-            backtest_metrics.get("Trades"),
-            monte_carlo_p_value,
-            None if fdr_significant is None else bool(fdr_significant),
-            None if regime_consistent is None else bool(regime_consistent),
-            json.dumps(params or {}),
-            datetime.now(timezone.utc),
-            provenance["git_commit"],
-            provenance["code_hash"],
-            provenance["python_version"],
-            provenance["pandas_version"],
-            provenance["numpy_version"],
-        ],
+        {
+            "experiment_id": experiment_id,
+            "signal": signal,
+            "ticker": ticker,
+            "sharpe": backtest_metrics.get("Sharpe"),
+            "max_drawdown": backtest_metrics.get("Max Drawdown"),
+            "win_rate": backtest_metrics.get("Win Rate"),
+            "cagr": backtest_metrics.get("CAGR"),
+            "trades": backtest_metrics.get("Trades"),
+            "monte_carlo_p_value": monte_carlo_p_value,
+            "fdr_significant": None if fdr_significant is None else bool(fdr_significant),
+            "regime_consistent": None if regime_consistent is None else bool(regime_consistent),
+            "params": json.dumps(params or {}),
+            "created_at": datetime.now(timezone.utc),
+            "git_commit": provenance["git_commit"],
+            "code_hash": provenance["code_hash"],
+            "python_version": provenance["python_version"],
+            "pandas_version": provenance["pandas_version"],
+            "numpy_version": provenance["numpy_version"],
+            "sharpe_deflated": sharpe_deflated,
+            "dsr_significant": None if dsr_significant is None else bool(dsr_significant),
+        },
     )
     conn.close()
     return experiment_id
