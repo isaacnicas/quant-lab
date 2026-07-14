@@ -4,3 +4,4 @@ __pycache__/
 data/*.duckdb
 pipeline_run*.log
 data/simfin_cache/
+data/edgar_cache/
