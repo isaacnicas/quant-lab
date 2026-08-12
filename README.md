@@ -1,5 +1,9 @@
 # Quant Lab — Alpha Discovery Pipeline
 
+For the standing research-process discipline (Exploration → Stressing →
+Confirmation, and where DSR/PBO belong in that sequence), see
+[RESEARCH.md](RESEARCH.md).
+
 A rule-based signal research pipeline: fetch price data, engineer features,
 label market regimes, generate combinatorial rule-based signals, backtest
 each one, validate with Monte Carlo + FDR + regime-consistency checks, and
