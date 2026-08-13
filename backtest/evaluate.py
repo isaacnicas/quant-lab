@@ -132,6 +132,52 @@ def calculate_cagr(returns: pd.Series, dates: Optional[pd.Series] = None) -> flo
     return float(final ** (1 / years) - 1)
 
 
+def _compute_trade_returns(
+    signal: str,
+    prices: pd.DataFrame,
+    stop_loss: float,
+    position_size: float,
+    cost_bps: float,
+) -> Tuple[np.ndarray, np.ndarray, pd.Series, pd.Series]:
+    """Shared internals for run_backtest() and strategy_returns() -- builds the
+    raw/lagged trade masks and gross/net return series exactly once, so there
+    is a single path from (signal, prices) to a return series rather than two
+    independent implementations that could silently drift apart. Returns
+    (raw_mask, trade_mask, gross_returns, net_returns).
+
+    Stop-loss is evaluated against the raw (same-bar) signal -- only the
+    final entry into calculate_returns is lagged by one bar, via the same
+    lag_mask() primitive validation/robustness.py uses too."""
+    price_series = _coerce_price_series(prices)
+    if price_series.empty or len(price_series) < 2:
+        empty = pd.Series(dtype=float)
+        return np.array([], dtype=bool), np.array([], dtype=bool), empty, empty
+
+    raw_mask = compute_signal_mask(prices, signal)
+    raw_mask = apply_stop_loss(raw_mask, price_series, stop_loss)
+    trade_mask = lag_mask(raw_mask, price_series.index).to_numpy()
+    gross_returns = calculate_returns(trade_mask, price_series, position_size)
+    net_returns = apply_transaction_costs(gross_returns, trade_mask, cost_bps, position_size)
+    return raw_mask, trade_mask, gross_returns, net_returns
+
+
+def strategy_returns(
+    signal: str,
+    prices: pd.DataFrame,
+    stop_loss: float = 0.05,
+    position_size: float = 0.01,
+    cost_bps: float = 5.0,
+) -> pd.Series:
+    """Net-of-cost daily return series for a signal -- the same series
+    run_backtest() computes internally, factored out as the single source of
+    truth so callers that need the actual per-period return series (e.g. DSR,
+    which needs it for skew/kurtosis/T) reuse it rather than recomputing it a
+    third way. run_backtest()'s own return contract (a scalar metrics dict)
+    is unchanged -- this is a separate, additive helper."""
+    _, _, _, net_returns = _compute_trade_returns(signal, prices, stop_loss, position_size, cost_bps)
+    return net_returns
+
+
 def run_backtest(
     signal: str,
     prices: pd.DataFrame,
@@ -143,27 +189,34 @@ def run_backtest(
     if price_series.empty or len(price_series) < 2:
         return {
             "Sharpe": float("nan"), "Max Drawdown": float("nan"), "Win Rate": float("nan"),
-            "Trades": 0, "CAGR": float("nan"),
+            "Trades": 0, "Days In Position": 0, "CAGR": float("nan"),
             "Gross Sharpe": float("nan"), "Net Sharpe": float("nan"),
             "Gross Max Drawdown": float("nan"), "Net Max Drawdown": float("nan"),
+            "Max Drawdown (Position-Scaled)": float("nan"),
+            "Gross Max Drawdown (Position-Scaled)": float("nan"),
+            "Net Max Drawdown (Position-Scaled)": float("nan"),
             "Gross CAGR": float("nan"), "Net CAGR": float("nan"),
             "Gross CAGR (Full Allocation)": float("nan"), "Net CAGR (Full Allocation)": float("nan"),
         }
 
     dates = prices["date"] if "date" in prices.columns else None
 
-    # Stop-loss is evaluated against the raw (same-bar) signal, same as before this
-    # refactor — only the final entry into calculate_returns is lagged by one bar,
-    # via the same lag_mask() primitive validation/robustness.py now uses too.
-    raw_mask = compute_signal_mask(prices, signal)
-    raw_mask = apply_stop_loss(raw_mask, price_series, stop_loss)
-    trade_mask = lag_mask(raw_mask, price_series.index).to_numpy()
-    gross_returns = calculate_returns(trade_mask, price_series, position_size)
-    net_returns = apply_transaction_costs(gross_returns, trade_mask, cost_bps, position_size)
+    raw_mask, trade_mask, gross_returns, net_returns = _compute_trade_returns(
+        signal, prices, stop_loss, position_size, cost_bps
+    )
 
     gross_sharpe, net_sharpe = calculate_sharpe(gross_returns), calculate_sharpe(net_returns)
-    gross_dd, net_dd = calculate_max_drawdown(gross_returns), calculate_max_drawdown(net_returns)
     gross_cagr, net_cagr = calculate_cagr(gross_returns, dates), calculate_cagr(net_returns, dates)
+
+    # Max Drawdown, unlike Sharpe, is NOT scale-free: it shrinks ~linearly with
+    # position_size (a 100x smaller position looks ~100x "safer" on paper even
+    # though nothing about the underlying trade changed). Full-allocation
+    # (position_size divided back out) is the economically real number and is
+    # now primary; the position-scaled figure is kept but renamed explicitly
+    # so it can't be mistaken for portfolio-level risk.
+    gross_dd, net_dd = calculate_max_drawdown(gross_returns), calculate_max_drawdown(net_returns)
+    gross_dd_full = calculate_max_drawdown(gross_returns / position_size)
+    net_dd_full = calculate_max_drawdown(net_returns / position_size)
 
     # Full-allocation CAGR: divide position_size back out before compounding, so
     # it reads as "if 100% of capital were deployed on every trade" rather than
@@ -174,20 +227,26 @@ def run_backtest(
     gross_cagr_full = calculate_cagr(gross_returns / position_size, dates)
     net_cagr_full = calculate_cagr(net_returns / position_size, dates)
 
-    # "Sharpe"/"Max Drawdown"/"CAGR" default to net-of-cost — the economically
-    # real numbers — with Gross/Net variants both exposed for side-by-side
+    # "Sharpe"/"CAGR" default to net-of-cost, position-scaled; "Max Drawdown"
+    # defaults to net-of-cost, FULL-allocation (drawdown isn't scale-free like
+    # Sharpe, so the position-scaled figure would understate real risk).
+    # Gross/Net and Position-Scaled variants are all exposed for side-by-side
     # comparison; existing callers (e.g. main.py -> journal) keep working
-    # unchanged, just against more realistic figures.
+    # unchanged, just against a more realistic "Max Drawdown" figure now.
     return {
         "Sharpe": net_sharpe,
-        "Max Drawdown": net_dd,
+        "Max Drawdown": net_dd_full,
         "Win Rate": calculate_win_rate(net_returns, trade_mask),
-        "Trades": int(np.sum(raw_mask)),
+        "Trades": len(group_trades(trade_mask)),
+        "Days In Position": int(np.sum(raw_mask)),
         "CAGR": net_cagr,
         "Gross Sharpe": gross_sharpe,
         "Net Sharpe": net_sharpe,
-        "Gross Max Drawdown": gross_dd,
-        "Net Max Drawdown": net_dd,
+        "Gross Max Drawdown": gross_dd_full,
+        "Net Max Drawdown": net_dd_full,
+        "Max Drawdown (Position-Scaled)": net_dd,
+        "Gross Max Drawdown (Position-Scaled)": gross_dd,
+        "Net Max Drawdown (Position-Scaled)": net_dd,
         "Gross CAGR": gross_cagr,
         "Net CAGR": net_cagr,
         "Gross CAGR (Full Allocation)": gross_cagr_full,

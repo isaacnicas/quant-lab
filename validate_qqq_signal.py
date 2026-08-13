@@ -68,7 +68,8 @@ def main() -> None:
         wins = trades_by_year.get(year, [])
         rows.append({
             "Year": year,
-            "Trades": int(trade_mask[year_day_mask].sum()),
+            "Trades": len(wins),
+            "Days In Position": int(trade_mask[year_day_mask].sum()),
             "Sharpe": calculate_sharpe(year_net),
             "Win Rate": (sum(wins) / len(wins)) if wins else float("nan"),
             "Net CAGR": calculate_cagr(year_net, year_dates),

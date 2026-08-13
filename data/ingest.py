@@ -5,6 +5,14 @@ from typing import List
 from datetime import datetime
 
 
+class HoldoutViolationError(Exception):
+    """Raised when a discovery-path read would expose data past
+    IN_SAMPLE_END. Discovery (signal generation, Monte Carlo, FDR, backtest,
+    log_experiment) must never see the 2024-2025 holdout window -- it is
+    this project's only clean holdout, and once discovery touches it, it is
+    permanently spent. There is no un-seeing it."""
+
+
 def _reshape_to_long(raw: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
     """
     Reshape yfinance output into long format: one row per (ticker, date).
@@ -75,6 +83,34 @@ def load_prices(tickers: List[str], start: datetime, end: datetime, duckdb_path:
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"])
     return df
+
+
+def assert_discovery_in_sample(prices: pd.DataFrame, boundary: datetime) -> None:
+    """Structural backstop for the discovery path: raise HoldoutViolationError
+    if any row in `prices` is dated after `boundary` (normally
+    config.IN_SAMPLE_END). Call this immediately after every load_prices()
+    call used for discovery, regardless of what bound was requested at the
+    call site -- this is the check that makes a wrong call-site argument
+    impossible to violate silently, the same way signals/apply.py's shared
+    lag_mask() made double-lagging impossible rather than just documented
+    against. fetch_and_cache() is NOT guarded -- caching data through today
+    is harmless and useful for later evaluation; only the discovery READ is
+    bounded."""
+    if prices is None or prices.empty:
+        return
+    dates = pd.to_datetime(prices["date"])
+    max_date = dates.max()
+    boundary_ts = pd.Timestamp(boundary)
+    if max_date > boundary_ts:
+        raise HoldoutViolationError(
+            f"Discovery attempted to read data through {max_date.date()}, past "
+            f"the IN_SAMPLE_END boundary of {boundary_ts.date()}. This would "
+            f"burn the project's only clean 2024-2025 holdout window -- "
+            f"discovery (signal generation, Monte Carlo, FDR, backtest, "
+            f"log_experiment) must never see post-holdout data. Fix the "
+            f"load_prices() call on the discovery path to bound by "
+            f"config.IN_SAMPLE_END, not config.end_date."
+        )
 
 
 if __name__ == "__main__":
